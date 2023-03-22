@@ -1,5 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fs::OpenOptions;
 use std::num::NonZeroU8;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use rusttype::Font;
@@ -407,6 +409,9 @@ pub fn font_to_image(args: Args) {
             let serialized_meta = rkyv::to_bytes::<_, 4096>(&out_metadata).expect("Failed to serialize output metadata");
             std::fs::write(meta_path, serialized_meta).expect("Unable to write file");
         },
+        Some(Some("fnt")) => {
+            serialize_bmfont(meta_path, &args,&out_metadata).expect("Unable to serialize output metadata and write file");
+        }
         _ => {
             eprintln!("Failed to deduce meta data format from path: {}", args.meta_path);
             eprintln!("Supported formats are: ron, json, rkyv");
@@ -416,4 +421,75 @@ pub fn font_to_image(args: Args) {
     }
 
     println!("Ok.");
+}
+
+fn serialize_bmfont(path: impl AsRef<Path>, args: &Args, meta: &BitmapFont) -> Result<(), std::io::Error> {
+    // See: https://www.angelcode.com/products/bmfont/doc/file_format.html#bin
+
+    use std::io::Write;
+
+    let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
+
+    write!(&mut file, "info")?;
+    write!(&mut file, " face={}", PathBuf::from(&args.font_path).file_stem().unwrap_or_default().to_string_lossy().replace(" ", "_"))?;
+    write!(&mut file, " size={}", args.scale)?;
+    write!(&mut file, " bold={}", 0)?;
+    write!(&mut file, " italic={}", 0)?;
+    write!(&mut file, " charset=")?;
+    write!(&mut file, " unicode=")?;
+    write!(&mut file, " stretchH={}", 100)?;
+    write!(&mut file, " smooth={}", 1)?;
+    write!(&mut file, " aa={}", 1)?;
+    write!(&mut file, " padding={},{},{},{}", args.padding, args.padding, args.padding, args.padding)?;
+    write!(&mut file, " spacing={},{}", 0, 0)?;
+    writeln!(&mut file, " outline={}", 0)?;
+
+    write!(&mut file, "common")?;
+    write!(&mut file, " lineHeight={}", meta.line_gap as i32)?;
+    write!(&mut file, " base={}", meta.ascent as i32)?;
+    write!(&mut file, " scaleW={}", args.output_image_size)?;
+    write!(&mut file, " scaleH={}", args.output_image_size)?;
+    write!(&mut file, " pages={}", 1)?;
+    write!(&mut file, " packed={}", 0)?;
+    write!(&mut file, " alphaChnl={}", 4)?;
+    write!(&mut file, " redChnl={}", 0)?;
+    write!(&mut file, " greenChnl={}", 0)?;
+    writeln!(&mut file, " blueChnl={}", 0)?;
+
+    write!(&mut file, "page")?;
+    write!(&mut file, " id={}", 0)?;
+    writeln!(&mut file, " file={}", PathBuf::from(&args.img_path).file_name().unwrap_or_default().to_string_lossy())?;
+
+    write!(&mut file, "chars")?;
+    writeln!(&mut file, " count={}", meta.glyphs.values().filter(|glyph| glyph.bitmap_source.is_some()).count())?;
+
+    for (c, glyph) in &meta.glyphs {
+        if let Some(bmp) = glyph.bitmap_source.as_ref() {
+            write!(&mut file, "char")?;
+            write!(&mut file, " id={}", *c as u32)?;
+            write!(&mut file, " x={}", bmp.x)?;
+            write!(&mut file, " y={}", bmp.y)?;
+            write!(&mut file, " width={}", bmp.width)?;
+            write!(&mut file, " height={}", bmp.height)?;
+            write!(&mut file, " xoffset={}", glyph.left_side_bearing as i32)?;
+            write!(&mut file, " yoffset={}", glyph.ascent as i32)?;
+            write!(&mut file, " xadvance={}", glyph.advance_width as i32)?;
+            write!(&mut file, " page={}", 0)?;
+            writeln!(&mut file, " chnl={}", 15)?;
+        }
+    }
+
+    if let Some(kerning_table) = &meta.kerning_table {
+        write!(&mut file, "kernings")?;
+        writeln!(&mut file, " count={}", kerning_table.len())?;
+
+        for ((first, second), amount) in kerning_table {
+            write!(&mut file, "kerning")?;
+            write!(&mut file, " first={}", *first as u32)?;
+            write!(&mut file, " second={}", *second as u32)?;
+            writeln!(&mut file, " amount={}", *amount as i32)?;
+        }
+    }
+
+    Ok(())
 }
